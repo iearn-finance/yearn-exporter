@@ -1,10 +1,13 @@
+import time
 from dataclasses import dataclass
+from threading import Thread
 from typing import List
 
+from brownie import chain, web3
 from brownie.network.contract import Contract, InterfaceContainer
 
 from yearn import strategies, uniswap
-from yearn.events import fetch_events
+from yearn.events import UnknownEvent, decode_logs, fetch_events, get_logs
 from yearn.mutlicall import fetch_multicall
 
 VAULT_VIEWS_SCALED = [
@@ -80,3 +83,55 @@ def get_vaults(event_key="NewVault"):
 def get_experimental_vaults():
     return get_vaults("NewExperimentalVault")
 
+
+class Registry:
+
+    def __init__(self):
+        start = time.time()
+        print('Loading Vaults v2 Registry...')
+        self.registry = Contract(web3.ens.resolve("v2.registry.ychad.eth"))
+        {'deployed_block', 'experimental_block', 'endorsed_block'}
+        self.governance = None
+        self.api_versions = {}
+        self.vaults = {}
+        self.names = {}
+        self.endorsed = {}
+        self.tags = {}
+        self.events = fetch_events(self.registry)
+        self.process_events(self.events)
+        self.last_block = self.events[-1].block_number
+        self.thread = Thread(target=self.watch_events)
+        self.thread.start()
+        elapsed = time.time() - start
+        print(f'Loaded {len(self.api_versions)} releases and {len(self.vaults)} vaults in {elapsed:.2f}s')
+
+    def process_events(self, events):
+        for evt in events:
+            if evt.name == 'NewGovernance':
+                self.governance = evt['governance']
+
+            elif evt.name == 'NewRelease':
+                self.api_versions[evt['api_version']] = Contract(evt['template'])
+
+            elif evt.name in ['NewVault', 'NewExperimentalVault']:
+                if evt['vault'] in self.vaults:
+                    continue
+                vault = Contract.from_abi(
+                    f'Vault v{evt["api_version"]}',
+                    evt['vault'],
+                    self.api_versions[evt['api_version']].abi
+                )
+                self.vaults[evt['vault']] = vault
+                self.names[evt['vault']] = f'{vault.symbol()} {evt["api_version"]}'
+
+            elif evt.name == 'VaultTagged':
+                self.tags[evt['vault']] = evt['tag']
+            
+            else:
+                raise UnknownEvent(evt.name)
+
+    def watch_events(self):
+        for block in chain.new_blocks(height_buffer=10):
+            logs = get_logs(str(self.registry), self.last_block + 1, block.number)
+            self.process_events(decode_logs(logs))
+            self.last_block = block.number
