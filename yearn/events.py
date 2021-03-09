@@ -2,11 +2,15 @@ import itertools
 
 from brownie import chain, web3
 from brownie.network.event import EventDict
-from brownie.network.event import _decode_logs as decode_logs
+from brownie.network.event import _decode_logs
 from joblib import Memory, Parallel, delayed
 
 memory = Memory("cache", verbose=0)
 web3.provider._request_kwargs["timeout"] = 600
+
+
+class UnknownEvent(Exception):
+    pass
 
 
 def get_logs(address, from_block, to_block):
@@ -30,7 +34,19 @@ def contract_creation_block(address) -> int:
     return hi if hi != height else None
 
 
-def fetch_events(address) -> EventDict:
+def decode_logs(logs) -> EventDict:
+    """
+    Decode logs to events with additional info.
+    """
+    decoded = _decode_logs(logs)
+    for i, log in enumerate(logs):
+        setattr(decoded[i], "block_number", log["blockNumber"])
+        setattr(decoded[i], "transaction_hash", log["transactionHash"])
+        setattr(decoded[i], "log_index", log["logIndex"])
+    return decoded
+
+
+def fetch_events(address, verbose=0) -> EventDict:
     """
     Fetch all events emitted by a contract.
     Enriches events with additional data for further processing.
@@ -39,13 +55,8 @@ def fetch_events(address) -> EventDict:
     from_block = contract_creation_block(str(address))
     to_block = chain.height
     args = [[start, min(start + batch_size - 1, to_block)] for start in range(from_block, to_block, batch_size)]
-    tasks = Parallel(n_jobs=8, prefer="threads", verbose=10)(
+    tasks = Parallel(n_jobs=8, prefer="threads", verbose=verbose)(
         delayed(memory.cache(get_logs) if end < to_block else get_logs)(str(address), start, end) for start, end in args
     )
     logs = list(itertools.chain.from_iterable(tasks))
-    decoded = decode_logs(logs)
-    for i, log in enumerate(logs):
-        setattr(decoded[i], "block_number", log["blockNumber"])
-        setattr(decoded[i], "transaction_hash", log["transactionHash"])
-        setattr(decoded[i], "log_index", log["logIndex"])
-    return decoded
+    return decode_logs(logs)
